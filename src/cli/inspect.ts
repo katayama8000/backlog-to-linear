@@ -44,10 +44,22 @@ export async function inspect(argv: string[]): Promise<number> {
   info(`記法: ${project.textFormattingRule}`);
   info(`課題数: 全 ${total} / 未完了 ${open}`);
   info("");
-  info(`ステータス (${statuses.length}) — Linear 取込時にマッピングを聞かれます`);
+  info(`ステータス (${statuses.length}) — 小文字化した名前で Linear の状態と突合されます`);
   for (const s of statuses) {
-    const mark = s.id === BACKLOG_STATUS_CLOSED ? " ← 完了扱い" : "";
+    const mark = s.id === BACKLOG_STATUS_CLOSED
+      ? " ← 完了扱い"
+      : s.id > BACKLOG_STATUS_CLOSED
+      ? " ← 独自ステータス"
+      : "";
     info(`  ${s.id}\t${s.name}${mark}`);
+  }
+  if (statuses.some((s) => s.id > BACKLOG_STATUS_CLOSED)) {
+    info(
+      "  独自ステータスの種別は Backlog API から判別できません。完了・対応中に相当するものは",
+    );
+    info(
+      "  export で --closed-status / --started-status に名前を渡してください",
+    );
   }
   info("");
   info(`課題の種別 (${issueTypes.length}) — ラベル type/… になります`);

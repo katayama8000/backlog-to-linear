@@ -18,6 +18,10 @@ export const exportHelp = `b2l export --project PROJ [options]
   --out PATH               出力先（既定: ./out/<PROJ>.csv）
   --open-only              完了以外の課題のみ
   --status 未対応,処理中     ステータス名で絞る
+  --closed-status リリース済み,取り下げ
+                           完了として扱う独自ステータス（既定の「完了」に追加）
+  --started-status 対応中,レビュー中
+                           対応中として扱うステータス（Linear で Started 種別になる）
   --updated-since 2025-01-01
   --split N                N 行ごとにファイルを分割する
   --include-comments       コメントを Description に埋め込む
@@ -47,6 +51,8 @@ export async function exportCommand(argv: string[]): Promise<number> {
       "split",
       "comments-max",
       "assignee",
+      "closed-status",
+      "started-status",
     ],
     boolean: [
       "open-only",
@@ -84,7 +90,21 @@ export async function exportCommand(argv: string[]): Promise<number> {
   }
 
   const statuses = await client.getStatuses(project.projectKey);
-  const statusId = resolveStatusFilter(statuses, args["open-only"], args.status);
+  // Backlog API はステータスの種別を返さないので、独自ステータスの扱いは引数で宣言してもらう
+  const closedStatusIds = new Set([
+    ...defaultClosedStatusIds(),
+    ...resolveStatusIds(statuses, args["closed-status"], "--closed-status"),
+  ]);
+  const startedStatusIds = new Set(
+    resolveStatusIds(statuses, args["started-status"], "--started-status"),
+  );
+  for (const id of startedStatusIds) {
+    if (closedStatusIds.has(id)) {
+      const name = statuses.find((s) => s.id === id)?.name ?? String(id);
+      warn(`ステータス "${name}" は完了扱いが優先されます（--started-status は無視されます）`);
+    }
+  }
+  const statusId = resolveStatusFilter(statuses, args["open-only"], args.status, closedStatusIds);
   const query = {
     projectId: project.id,
     statusId,
@@ -126,7 +146,8 @@ export async function exportCommand(argv: string[]): Promise<number> {
     assigneeField: resolveAssigneeField(args.assignee),
     estimate: args.estimate,
     completed: args.completed,
-    closedStatusIds: defaultClosedStatusIds(),
+    closedStatusIds,
+    startedStatusIds,
   };
 
   const rows: LinearCsvRow[] = [];
@@ -169,31 +190,37 @@ export async function exportCommand(argv: string[]): Promise<number> {
   return 0;
 }
 
+/** カンマ区切りのステータス名を ID に解決する。空なら空配列。 */
+export function resolveStatusIds(
+  statuses: { id: number; name: string }[],
+  names: string | undefined,
+  flag: string,
+): number[] {
+  if (!names) return [];
+  return names.split(",").map((s) => s.trim()).filter(Boolean).map((name) => {
+    const found = statuses.find((s) => s.name === name);
+    if (!found) {
+      throw new ConfigError(
+        `${flag}: ステータス "${name}" が見つかりません。存在するのは: ${
+          statuses.map((s) => s.name).join(", ")
+        }`,
+      );
+    }
+    return found.id;
+  });
+}
+
 export function resolveStatusFilter(
   statuses: { id: number; name: string }[],
   openOnly: boolean | undefined,
   statusNames: string | undefined,
+  closedStatusIds: ReadonlySet<number> = new Set([BACKLOG_STATUS_CLOSED]),
 ): number[] | undefined {
-  if (statusNames) {
-    const wanted = statusNames.split(",").map((s) => s.trim()).filter(Boolean);
-    const ids: number[] = [];
-    for (const name of wanted) {
-      const found = statuses.find((s) => s.name === name);
-      if (!found) {
-        throw new ConfigError(
-          `ステータス "${name}" が見つかりません。存在するのは: ${
-            statuses.map((s) => s.name).join(", ")
-          }`,
-        );
-      }
-      ids.push(found.id);
-    }
-    return ids;
-  }
+  if (statusNames) return resolveStatusIds(statuses, statusNames, "--status");
   if (openOnly) {
     // Backlog の課題 API に「除外」の指定はないので、完了以外を列挙する。
-    // カスタムステータスも自動的に対象に含まれる。
-    return statuses.map((s) => s.id).filter((id) => id !== BACKLOG_STATUS_CLOSED);
+    // 独自ステータスも（--closed-status で完了と宣言されていなければ）対象に含まれる。
+    return statuses.map((s) => s.id).filter((id) => !closedStatusIds.has(id));
   }
   return undefined;
 }
@@ -256,6 +283,8 @@ async function writeReport(
 }
 
 function summarize(rows: LinearCsvRow[], warnings: IssueWarning[], parentCount: number): void {
+  const completedCount = rows.filter((r) => r.Completed).length;
+  const startedCount = rows.filter((r) => r.Started).length;
   const noAssignee = rows.filter((r) => !r.Assignee).length;
   const assignees = new Set(rows.map((r) => r.Assignee).filter(Boolean));
   const statuses = new Set(rows.map((r) => r.Status).filter(Boolean));
@@ -264,6 +293,9 @@ function summarize(rows: LinearCsvRow[], warnings: IssueWarning[], parentCount: 
   info("");
   info(`課題: ${rows.length} 件 / 担当者未設定: ${noAssignee} 件`);
   info(`ステータス: ${[...statuses].join(", ") || "-"}`);
+  info(
+    `完了扱い (Completed 列あり): ${completedCount} 件 / 対応中扱い (Started 列あり): ${startedCount} 件`,
+  );
   // importer はこの文字列で Linear ユーザーを突合するので、目視できるよう並べる
   info(`担当者 (Linear 側と突合される値): ${[...assignees].join(", ") || "-"}`);
   info(`ラベル: ${labels.size} 種`);

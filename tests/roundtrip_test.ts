@@ -99,6 +99,7 @@ const opts = {
   estimate: true,
   completed: true,
   closedStatusIds: defaultClosedStatusIds(),
+  startedStatusIds: new Set<number>(),
 };
 
 Deno.test("importer が全行を読み、値が壊れない", () => {

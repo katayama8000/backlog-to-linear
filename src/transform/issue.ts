@@ -25,8 +25,14 @@ export interface TransformOptions extends DescriptionOptions {
   estimate: boolean;
   /** 完了状態の課題に Completed 列を埋めるか（Backlog に完了日時がないため updated で近似） */
   completed: boolean;
-  /** 完了として扱うステータス ID */
+  /** 完了として扱うステータス ID（Completed 列を埋める） */
   closedStatusIds: ReadonlySet<number>;
+  /**
+   * 対応中として扱うステータス ID（Started 列を埋める）。
+   * importer は状態を自動作成するとき Completed → Started → Backlog の順で種別を決めるため、
+   * ここを指定しないと「対応中」相当の独自ステータスが Backlog 種別で作られる。
+   */
+  startedStatusIds: ReadonlySet<number>;
 }
 
 export interface TransformResult {
@@ -74,7 +80,10 @@ export function toCsvRow(
   opts: TransformOptions,
 ): TransformResult {
   const { text, warnings } = buildDescription(issue, comments, opts);
-  const isClosed = issue.status != null && opts.closedStatusIds.has(issue.status.id);
+  const statusId = issue.status?.id;
+  const isClosed = statusId != null && opts.closedStatusIds.has(statusId);
+  // Completed が入っていれば importer 側で Started は見られないので、完了時は出さない
+  const isStarted = !isClosed && statusId != null && opts.startedStatusIds.has(statusId);
 
   const assignee = resolveAssignee(issue, opts.assigneeField, warnings);
 
@@ -100,7 +109,8 @@ export function toCsvRow(
       "Cycle End": "",
       Created: issue.created,
       Updated: issue.updated,
-      Started: "",
+      // Backlog に「着手日時」はないので、開始日、無ければ登録日で近似する
+      Started: isStarted ? (issue.startDate ?? issue.created) : "",
       Completed: opts.completed && isClosed ? issue.updated : "",
       Canceled: "",
       // 値が入っていると importer が行ごとスキップするため、必ず空

@@ -20,6 +20,7 @@ const opts = {
   estimate: true,
   completed: true,
   closedStatusIds: defaultClosedStatusIds(),
+  startedStatusIds: new Set<number>(),
 };
 
 Deno.test("優先度は Linear の文字列表現に変換する", () => {
@@ -114,4 +115,44 @@ Deno.test("担当者未設定は警告する", () => {
   const { row, warnings } = toCsvRow(makeIssue({ assignee: null }), [], opts);
   assertEquals(row.Assignee, "");
   assertEquals(warnings, ["担当者が未設定です"]);
+});
+
+Deno.test("独自ステータスを完了扱いにできる（Completed 列を埋める）", () => {
+  const issue = makeIssue({ status: { id: 7, name: "リリース済み" } });
+  // 宣言しなければ未完了のまま
+  assertEquals(toCsvRow(issue, [], opts).row.Completed, "");
+  const declared = toCsvRow(issue, [], {
+    ...opts,
+    closedStatusIds: new Set([4, 7]),
+  });
+  assertEquals(declared.row.Completed, "2024-02-01T09:00:00Z");
+});
+
+Deno.test("独自ステータスを対応中扱いにできる（Started 列を埋める）", () => {
+  const issue = makeIssue({ status: { id: 8, name: "レビュー中" } });
+  assertEquals(toCsvRow(issue, [], opts).row.Started, "");
+  const declared = toCsvRow(issue, [], { ...opts, startedStatusIds: new Set([8]) });
+  // 開始日がなければ登録日で近似する
+  assertEquals(declared.row.Started, "2024-01-01T09:00:00Z");
+});
+
+Deno.test("開始日があれば Started にそれを使う", () => {
+  const issue = makeIssue({
+    status: { id: 8, name: "レビュー中" },
+    startDate: "2024-01-15T00:00:00Z",
+  });
+  const { row } = toCsvRow(issue, [], { ...opts, startedStatusIds: new Set([8]) });
+  assertEquals(row.Started, "2024-01-15T00:00:00Z");
+});
+
+Deno.test("完了と対応中の両方に該当したら完了を優先する", () => {
+  const issue = makeIssue({ status: { id: 7, name: "リリース済み" } });
+  const { row } = toCsvRow(issue, [], {
+    ...opts,
+    closedStatusIds: new Set([4, 7]),
+    startedStatusIds: new Set([7]),
+  });
+  assertEquals(row.Completed, "2024-02-01T09:00:00Z");
+  // importer は completedAt を先に見るので Started は出さない
+  assertEquals(row.Started, "");
 });

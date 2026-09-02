@@ -3,6 +3,7 @@ import {
   resolveAssigneeField,
   resolveLabelPrefixes,
   resolveStatusFilter,
+  resolveStatusIds,
 } from "../src/cli/export.ts";
 import { ConfigError } from "../src/config.ts";
 
@@ -11,15 +12,34 @@ const statuses = [
   { id: 2, name: "処理中" },
   { id: 3, name: "処理済み" },
   { id: 4, name: "完了" },
-  { id: 5, name: "レビュー待ち" }, // カスタムステータス
+  { id: 5, name: "レビュー待ち" }, // 独自ステータス
+  { id: 6, name: "リリース済み" }, // 独自ステータス（完了相当）
 ];
 
 Deno.test("指定なしなら全ステータスを対象にする", () => {
   assertEquals(resolveStatusFilter(statuses, undefined, undefined), undefined);
 });
 
-Deno.test("--open-only は完了以外を列挙する（カスタムステータスも含む）", () => {
-  assertEquals(resolveStatusFilter(statuses, true, undefined), [1, 2, 3, 5]);
+Deno.test("--open-only は完了以外を列挙する（独自ステータスも含む）", () => {
+  assertEquals(resolveStatusFilter(statuses, true, undefined), [1, 2, 3, 5, 6]);
+});
+
+Deno.test("--open-only は --closed-status で宣言した独自ステータスも除外する", () => {
+  assertEquals(
+    resolveStatusFilter(statuses, true, undefined, new Set([4, 6])),
+    [1, 2, 3, 5],
+  );
+});
+
+Deno.test("--closed-status / --started-status の名前を ID に解決する", () => {
+  assertEquals(resolveStatusIds(statuses, undefined, "--closed-status"), []);
+  assertEquals(resolveStatusIds(statuses, "リリース済み", "--closed-status"), [6]);
+  assertEquals(resolveStatusIds(statuses, "処理中, レビュー待ち", "--started-status"), [2, 5]);
+  const error = assertThrows(
+    () => resolveStatusIds(statuses, "存在しない", "--closed-status"),
+    ConfigError,
+  );
+  assertEquals(error.message.includes("--closed-status"), true);
 });
 
 Deno.test("--status は名前を ID に解決する", () => {
