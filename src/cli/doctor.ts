@@ -1,6 +1,6 @@
 import { parseArgs } from "@std/cli/parse-args";
 import { BacklogClient } from "../backlog/client.ts";
-import { resolveCredentials } from "../config.ts";
+import { rejectUnknownFlags, resolveCredentials } from "../config.ts";
 import { info, warn } from "../log.ts";
 
 export const doctorHelp = `b2l doctor --project PROJ [--space xxx.backlog.jp]
@@ -8,7 +8,11 @@ export const doctorHelp = `b2l doctor --project PROJ [--space xxx.backlog.jp]
   Backlog API の疎通・権限・プロジェクト設定を確認する。`;
 
 export async function doctor(argv: string[]): Promise<number> {
-  const args = parseArgs(argv, { string: ["space", "project"] });
+  const args = parseArgs(argv, {
+    string: ["space", "project"],
+    boolean: ["verbose"],
+    unknown: rejectUnknownFlags(["space", "project", "verbose"]),
+  });
   const { space, apiKey } = resolveCredentials(args.space);
   const client = new BacklogClient({ space, apiKey });
 

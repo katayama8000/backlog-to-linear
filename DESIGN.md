@@ -123,7 +123,7 @@ b2l enrich --team ENG            取込後に親子課題（sub-issue）を張�
 --dry-run                件数と警告だけ出して書き出さない
 ```
 
-## 4.5 親子課題の復元（b2l enrich）
+## 4.5 CSV で運べないものの復元（b2l enrich）
 
 Linear CSV importer には親を指定する列がない（`LinearIssueType` に Parent 相当が存在せず、 importer
 が組み立てる Issue にも `parentId` がない）。よって取込直後は必ずフラットになる。
@@ -150,6 +150,10 @@ Linear CSV importer には親を指定する列がない（`LinearIssueType` に
 
 - 突合キーは脚注の1行だけ。書式（`MIGRATION_MARKER`）を変えると既存の取込分を追えなくなるため、
   定数として1箇所に置き、テストで固定している
+- 課題の取得は **Team 指定の一覧**で行う。脚注を `description: { contains: ... }` で 検索すれば
+  `--team` を省けるが、この検索は検索インデックス経由で書き込みに遅れて追従する。
+  実測で、取り込み直後の 182 件が 1 件も返らなかった（同じ Workspace の古い 79 件は返った）。
+  取り込み直後に走らせる処理なので、インデックスに依存しない経路を選ぶ
 - 既に親が設定済みの課題はスキップするので**何度実行しても同じ結果**になる（`--overwrite` で上書き）
 - 脚注がない課題（Linear で手作りされたもの）は対応表に入らないので巻き込まない
 - 同じ課題キーに複数の Linear 課題が対応したら重複取込として警告する
@@ -159,6 +163,9 @@ Linear CSV importer には親を指定する列がない（`LinearIssueType` に
 では扱わない。
 
 ## 4. 取り込み手順（README に載せる運用）
+
+`scripts/migrate.sh` が doctor → export → npx import → enrich を通しで実行する。 Linear
+への書き込みは取り消しが面倒なので、取り込み直前に確認を挟む。 以下は各段を手で叩く場合の手順。
 
 ```bash
 # 1. 下調べ

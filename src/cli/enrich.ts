@@ -3,18 +3,23 @@ import { dirname, join } from "@std/path";
 import { LinearClient } from "../linear/client.ts";
 import { parseBacklogKey } from "../transform/description.ts";
 import type { RelationsFile } from "../transform/relations.ts";
-import { ConfigError } from "../config.ts";
+import { type CommentsFile, formatCommentBody } from "../transform/comments.ts";
+import { ConfigError, rejectUnknownFlags } from "../config.ts";
 import { info, progress, progressDone, verbose, warn } from "../log.ts";
 
-export const enrichHelp = `b2l enrich --team ENG [options]
+export const enrichHelp = `b2l enrich --project PROJ --team ENG [options]
 
-  CSV 取り込み後に、Linear 上で親子課題（sub-issue）を張り直す。
-  Linear CSV には親を指定する列がないため、この後追い処理で復元する。
-  突合は Description の脚注 "Migrated from Backlog PROJ-123" を使う。
+  CSV 取り込み後に、Linear CSV では運べない情報を後追いで復元する。
+  親子課題（sub-issue）と、任意でコメントを投入する。
 
+  突合は Description の脚注 "Migrated from Backlog [PROJ-123]" を使う。
+
+  --project PROJ           Backlog のプロジェクトキー（必須）
   --team ENG               取り込み先の Linear Team キー（必須）
-  --relations PATH         export が出したサイドカー（既定: ./out/<PROJ>.relations.json）
-  --project PROJ           既定パスを組み立てるためのプロジェクトキー
+  --comments               コメントも投入する（export の --comments-sidecar が必要）
+  --no-parents             親子課題の復元を行わない
+  --relations PATH         親子のサイドカー（既定: ./out/sidecars/<PROJ>.relations.json）
+  --comments-file PATH     コメントのサイドカー（既定: ./out/sidecars/<PROJ>.comments.json）
   --dry-run                何を張るか表示するだけで更新しない
   --overwrite              既に親が設定されている課題も上書きする
   --verbose
@@ -23,11 +28,23 @@ export const enrichHelp = `b2l enrich --team ENG [options]
 
 export async function enrich(argv: string[]): Promise<number> {
   const args = parseArgs(argv, {
-    string: ["team", "relations", "project"],
-    boolean: ["dry-run", "overwrite", "verbose"],
+    string: ["team", "relations", "project", "comments-file"],
+    boolean: ["dry-run", "overwrite", "verbose", "comments", "parents"],
+    default: { parents: true },
+    unknown: rejectUnknownFlags([
+      "team",
+      "relations",
+      "project",
+      "comments-file",
+      "dry-run",
+      "overwrite",
+      "verbose",
+      "comments",
+      "parents",
+    ]),
   });
 
-  if (!args.team) throw new ConfigError("--team ENG を指定してください。");
+  if (!args.project) throw new ConfigError("--project PROJ を指定してください。");
   const apiKey = Deno.env.get("LINEAR_API_KEY");
   if (!apiKey) {
     throw new ConfigError(
@@ -37,26 +54,45 @@ export async function enrich(argv: string[]): Promise<number> {
   }
 
   const relationsPath = args.relations ??
-    (args.project ? join("out", `${args.project}.relations.json`) : undefined);
-  if (!relationsPath) {
-    throw new ConfigError("--relations PATH か --project PROJ を指定してください。");
-  }
+    join("out", "sidecars", `${args.project}.relations.json`);
+  const commentsPath = args["comments-file"] ??
+    join("out", "sidecars", `${args.project}.comments.json`);
 
-  const relations = await readRelations(relationsPath);
-  if (relations.parents.length === 0) {
-    info(`${relationsPath}: 親子関係はありません。`);
+  const relations = args.parents ? await readRelations(relationsPath) : null;
+  const comments = args.comments ? await readComments(commentsPath) : null;
+  if (!relations?.parents.length && !comments?.issues.length) {
+    info("復元するものがありません（親子関係もコメントもサイドカーにありません）。");
     return 0;
   }
-  info(`${relationsPath}: ${relations.parents.length} 組の親子関係を復元します`);
+  if (relations?.parents.length) {
+    info(`${relationsPath}: ${relations.parents.length} 組の親子関係`);
+  }
+  if (comments?.issues.length) {
+    const total = comments.issues.reduce((n, i) => n + i.comments.length, 0);
+    info(`${commentsPath}: ${total} 件のコメント（${comments.issues.length} 課題）`);
+  }
 
   const client = new LinearClient({ apiKey });
-  const issues = await client.listTeamIssues(args.team);
-  if (issues.length === 0) {
+  if (!args.team) {
+    const teams = await client.listTeamKeys();
     throw new ConfigError(
-      `Team "${args.team}" に課題が見つかりません。Team キーと CSV の取り込みを確認してください。`,
+      "--team を指定してください（取り込み先に選んだ Team）。この Workspace の Team: " +
+        teams.map((t) => `${t.key} (${t.name})`).join(", "),
     );
   }
-  verbose(`Team ${args.team} の課題: ${issues.length} 件`);
+
+  // 脚注のマーカーで検索する手もあるが、その検索は書き込みに遅れて追従するため、
+  // 取り込み直後だと課題が丸ごと漏れる。Team 指定の一覧は実体を直接読むので確実。
+  const issues = await client.listTeamIssues(args.team);
+  if (issues.length === 0) {
+    const teams = await client.listTeamKeys();
+    throw new ConfigError(
+      `Team "${args.team}" に課題が見つかりません。この Workspace の Team: ` +
+        teams.map((t) => `${t.key} (${t.name})`).join(", "),
+    );
+  }
+  info(`対象 Team: ${issues[0].teamKey} (${issues[0].teamName})`);
+  verbose(`Team の課題: ${issues.length} 件`);
 
   // 脚注から Backlog 課題キー → Linear 課題の対応表を作る
   const byBacklogKey = new Map<string, typeof issues[number]>();
@@ -76,8 +112,9 @@ export async function enrich(argv: string[]): Promise<number> {
   let skipped = 0;
   const unresolved: string[] = [];
 
-  for (const [index, pair] of relations.parents.entries()) {
-    progress(`親子を設定中… ${index + 1}/${relations.parents.length}`);
+  const parentPairs = relations?.parents ?? [];
+  for (const [index, pair] of parentPairs.entries()) {
+    progress(`親子を設定中… ${index + 1}/${parentPairs.length}`);
     const child = byBacklogKey.get(pair.child);
     const parent = byBacklogKey.get(pair.parent);
     if (!child || !parent) {
@@ -109,17 +146,112 @@ export async function enrich(argv: string[]): Promise<number> {
     }
   }
   progressDone();
+  if (relations?.parents.length) {
+    info(
+      `${args["dry-run"] ? "(dry-run) " : ""}親子: 設定 ${updated} 件 / スキップ ${skipped} 件`,
+    );
+  }
+
+  if (comments) {
+    const result = await importComments(client, comments, byBacklogKey, {
+      dryRun: !!args["dry-run"],
+    });
+    unresolved.push(...result.unresolved);
+    info(
+      `${args["dry-run"] ? "(dry-run) " : ""}コメント: 投入 ${result.created} 件 / ` +
+        `投入済みでスキップ ${result.skipped} 件`,
+    );
+  }
 
   info("");
-  info(
-    `${args["dry-run"] ? "(dry-run) " : ""}設定: ${updated} 件 / スキップ: ${skipped} 件 / ` +
-      `未解決: ${unresolved.length} 件`,
-  );
+  info(`未解決: ${unresolved.length} 件`);
   for (const line of unresolved) warn(line);
   if (unresolved.length > 0) {
     info("未解決の多くは、絞り込みで親課題が CSV に含まれていない場合に起きます。");
   }
   return 0;
+}
+
+interface CommentImportResult {
+  created: number;
+  skipped: number;
+  unresolved: string[];
+}
+
+/**
+ * コメントを本物の Linear コメントとして投入する。
+ *
+ * 投入済み判定は「同じ課題に同じ作成日時のコメントが既にあるか」で行う。
+ * commentCreate に渡した createdAt はそのまま保存されるので、本文にマーカーを
+ * 埋めなくても再実行を安全にできる。
+ */
+async function importComments(
+  client: LinearClient,
+  comments: CommentsFile,
+  byBacklogKey: ReadonlyMap<string, { id: string; identifier: string }>,
+  opts: { dryRun: boolean },
+): Promise<CommentImportResult> {
+  let created = 0;
+  let skipped = 0;
+  const unresolved: string[] = [];
+
+  for (const [index, entry] of comments.issues.entries()) {
+    progress(`コメントを投入中… ${index + 1}/${comments.issues.length} 課題`);
+    const issue = byBacklogKey.get(entry.key);
+    if (!issue) {
+      unresolved.push(
+        `${entry.key} のコメント ${entry.comments.length} 件（課題が見つかりません）`,
+      );
+      continue;
+    }
+
+    const existing = new Set(
+      (await client.listCommentTimestamps(issue.id)).map(normalizeTimestamp),
+    );
+    // 古い順に入れる
+    for (const comment of [...entry.comments].sort((a, b) => a.created.localeCompare(b.created))) {
+      const createdAt = new Date(comment.created).toISOString();
+      if (existing.has(normalizeTimestamp(createdAt))) {
+        skipped++;
+        continue;
+      }
+      if (opts.dryRun) {
+        created++;
+        verbose(`(dry-run) ${issue.identifier} ← ${comment.author} (${comment.created})`);
+        continue;
+      }
+      const ok = await client.createComment(issue.id, formatCommentBody(comment), createdAt);
+      if (ok) {
+        created++;
+        existing.add(normalizeTimestamp(createdAt));
+        verbose(`${issue.identifier} ← ${comment.author} (${comment.created})`);
+      } else {
+        unresolved.push(`${entry.key} のコメント ${comment.id}（commentCreate が失敗）`);
+      }
+    }
+  }
+  progressDone();
+  return { created, skipped, unresolved };
+}
+
+/** ミリ秒以下の表現ゆれを吸収する（秒単位で比較する） */
+function normalizeTimestamp(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : String(Math.floor(date.getTime() / 1000));
+}
+
+async function readComments(path: string): Promise<CommentsFile> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(path);
+  } catch {
+    throw new ConfigError(
+      `${path} が読めません。\`b2l export --comments-sidecar\` で書き出してください。`,
+    );
+  }
+  const parsed = JSON.parse(text) as CommentsFile;
+  if (!Array.isArray(parsed.issues)) throw new ConfigError(`${path} の形式が不正です。`);
+  return parsed;
 }
 
 async function readRelations(path: string): Promise<RelationsFile> {

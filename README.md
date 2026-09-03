@@ -32,6 +32,33 @@ deno task b2l doctor --project PROJ
 
 ## 使い方
 
+### まとめて実行する
+
+```bash
+export LINEAR_API_KEY=lin_api_xxx
+scripts/migrate.sh --project PROJ
+```
+
+`doctor` → `export` → `npx @linear/import` → `enrich` まで通しで実行します。 Linear
+への取り込み直前に確認を挟むので、Team を間違えたときはそこで止められます。
+
+| オプション       | 説明                                                            |
+| ---------------- | --------------------------------------------------------------- |
+| `--project PROJ` | Backlog のプロジェクトキー（必須）                              |
+| `--team ENG`     | Linear の Team キー。取り込み先の選択と親子課題の復元まで自動化 |
+| `--export-only`  | CSV の書き出しまでで止める                                      |
+| `--yes`          | 取り込み前の確認を省略する                                      |
+| `-- <引数>`      | `--` 以降は `b2l export` にそのまま渡す                         |
+
+```bash
+# 未完了のみ、コメント込みで書き出して取り込む
+scripts/migrate.sh --project PROJ --team ENG -- --open-only --include-comments
+# まず CSV だけ作って中身を確認する
+scripts/migrate.sh --project PROJ --export-only
+```
+
+### 1コマンドずつ実行する
+
 ```bash
 # 1. 下調べ（ステータス・種別・カテゴリー・担当者・課題数を一覧）
 deno task b2l inspect --project PROJ
@@ -39,9 +66,8 @@ deno task b2l inspect --project PROJ
 # 2. 書き出し
 deno task b2l export --project PROJ --open-only
 
-# 3. 取り込み（Linear 公式 CLI）
+# 3. 取り込み（Linear 公式 CLI）。--team は付けないこと（後述）
 LINEAR_API_KEY=lin_api_xxx npx @linear/import --importer linearCsv
-#   → "Linear (CSV)" を選択
 #   → out/PROJ.csv を指定
 #   → 取り込み先 Team を選択
 #   → "Assign to user:" で [Provided assignee] を選ぶ（CSV の Assignee 列を使う）
@@ -70,6 +96,12 @@ deno task b2l enrich --project PROJ --team ENG
 CSV の値を使いたいなら **`[Provided assignee]`** を選んでください。突合は
 **小文字化したメールアドレス → 小文字化した表示名** の順で、一致しなければ黙って
 未割り当てになります。この CLI が既定でメールアドレスを出しているのはこのためです。
+
+> **`npx @linear/import` に `--team` を渡してはいけません。** `--team` が解決できると importer
+> は対話ブロックを丸ごとスキップし、 `targetAssignee` が未設定のまま処理を進めます。その結果、
+> `[Provided assignee]` を選ぶ機会がないまま **全件が未割り当て**で取り込まれます （`--self-assign`
+> も同時に渡した場合のみ全件が自分に割り当たります）。 `scripts/migrate.sh` の `--team` は
+> `b2l enrich` にだけ使い、importer には渡しません。
 
 **ステータス**: 小文字化した名前で Linear の既存ワークフロー状態と突合し、
 **無ければ自動作成**されます。作成時の種別は CSV の `Completed` / `Started` から

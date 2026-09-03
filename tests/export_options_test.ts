@@ -5,7 +5,7 @@ import {
   resolveStatusFilter,
   resolveStatusIds,
 } from "../src/cli/export.ts";
-import { ConfigError } from "../src/config.ts";
+import { ConfigError, rejectUnknownFlags } from "../src/config.ts";
 
 const statuses = [
   { id: 1, name: "未対応" },
@@ -77,4 +77,21 @@ Deno.test("--assignee は email/name のみ受け付ける", () => {
   assertEquals(resolveAssigneeField("email"), "email");
   assertEquals(resolveAssigneeField("name"), "name");
   assertThrows(() => resolveAssigneeField("mail"), ConfigError);
+});
+
+Deno.test("知らないオプションは黙って無視せずエラーにする", () => {
+  const reject = rejectUnknownFlags(["project", "comments-sidecar"]);
+  assertEquals(reject("--project"), true);
+  assertEquals(reject("--comments-sidecar"), true);
+  // boolean の否定形も許す
+  assertEquals(reject("--no-comments-sidecar"), true);
+  // 値付きの形も許す
+  assertEquals(reject("--project=PROJ"), true);
+  // 位置引数は素通し
+  assertEquals(reject("PROJ"), true);
+
+  // scripts/migrate.sh -- --comments のように渡す先を間違えたケース
+  const error = assertThrows(() => reject("--comments"), ConfigError);
+  assertEquals(error.message.includes("--comments"), true);
+  assertEquals(error.message.includes("使えるのは"), true);
 });

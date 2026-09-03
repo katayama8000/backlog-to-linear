@@ -49,3 +49,22 @@ export function resolveCredentials(space: string | undefined): Credentials {
   }
   return { space: resolvedSpace, apiKey };
 }
+
+/**
+ * parseArgs の `unknown` に渡すコールバック。
+ *
+ * 既定の parseArgs は知らないフラグを黙って受け流すため、綴り違いや
+ * 渡す先を間違えたフラグ（`scripts/migrate.sh -- --comments` など）が
+ * 「何も起きない」という形で表面化してしまう。ここで即座に落とす。
+ */
+export function rejectUnknownFlags(allowed: readonly string[]): (arg: string) => boolean {
+  const known = new Set(allowed);
+  return (arg: string) => {
+    if (!arg.startsWith("-")) return true;
+    const name = arg.replace(/^--?/, "").replace(/^no-/, "").split("=")[0];
+    if (known.has(name)) return true;
+    throw new ConfigError(
+      `知らないオプションです: ${arg}\n  使えるのは: ${allowed.map((a) => `--${a}`).join(", ")}`,
+    );
+  };
+}

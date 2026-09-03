@@ -1,7 +1,7 @@
 import { parseArgs } from "@std/cli/parse-args";
 import { BacklogClient } from "../backlog/client.ts";
 import { BACKLOG_STATUS_CLOSED } from "../backlog/types.ts";
-import { ConfigError, resolveCredentials } from "../config.ts";
+import { ConfigError, rejectUnknownFlags, resolveCredentials } from "../config.ts";
 import { info } from "../log.ts";
 
 export const inspectHelp = `b2l inspect --project PROJ [--space xxx.backlog.jp] [--json]
@@ -10,7 +10,11 @@ export const inspectHelp = `b2l inspect --project PROJ [--space xxx.backlog.jp] 
   参加者と課題数を一覧する。書き込みは一切しない。`;
 
 export async function inspect(argv: string[]): Promise<number> {
-  const args = parseArgs(argv, { string: ["space", "project"], boolean: ["json"] });
+  const args = parseArgs(argv, {
+    string: ["space", "project"],
+    boolean: ["json", "verbose"],
+    unknown: rejectUnknownFlags(["space", "project", "json", "verbose"]),
+  });
   if (!args.project) throw new ConfigError("--project PROJ を指定してください。");
 
   const { space, apiKey } = resolveCredentials(args.space);

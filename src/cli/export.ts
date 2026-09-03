@@ -1,11 +1,12 @@
 import { parseArgs } from "@std/cli/parse-args";
-import { dirname, join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { BacklogClient } from "../backlog/client.ts";
 import { BACKLOG_STATUS_CLOSED, type BacklogComment, type BacklogIssue } from "../backlog/types.ts";
 import { type LinearCsvRow, toCsv } from "../csv/writer.ts";
 import { defaultClosedStatusIds, type LabelPrefixes, toCsvRow } from "../transform/issue.ts";
 import { buildRelations } from "../transform/relations.ts";
-import { ConfigError, resolveCredentials } from "../config.ts";
+import { buildCommentsFile } from "../transform/comments.ts";
+import { ConfigError, rejectUnknownFlags, resolveCredentials } from "../config.ts";
 import { info, mapPool, progress, progressDone, verbose, warn } from "../log.ts";
 
 export const exportHelp = `b2l export --project PROJ [options]
@@ -25,6 +26,8 @@ export const exportHelp = `b2l export --project PROJ [options]
   --updated-since 2025-01-01
   --split N                N 行ごとにファイルを分割する
   --include-comments       コメントを Description に埋め込む
+  --comments-sidecar       コメントを <PROJ>.comments.json に書き出す
+                           （取り込み後に b2l enrich --comments で本物のコメントとして投入）
   --comments-max N         埋め込むコメント数の上限（既定: 20、0 で無制限）
   --no-estimate            Estimate 列を空にする
   --no-completed           Completed 列を空にする
@@ -57,6 +60,7 @@ export async function exportCommand(argv: string[]): Promise<number> {
     boolean: [
       "open-only",
       "include-comments",
+      "comments-sidecar",
       "estimate",
       "completed",
       "issue-links",
@@ -66,6 +70,29 @@ export async function exportCommand(argv: string[]): Promise<number> {
       "verbose",
     ],
     collect: ["label-prefix"],
+    unknown: rejectUnknownFlags([
+      "space",
+      "project",
+      "out",
+      "status",
+      "updated-since",
+      "split",
+      "comments-max",
+      "assignee",
+      "closed-status",
+      "started-status",
+      "open-only",
+      "include-comments",
+      "comments-sidecar",
+      "estimate",
+      "completed",
+      "issue-links",
+      "relations",
+      "dry-run",
+      "force",
+      "verbose",
+      "label-prefix",
+    ]),
     default: {
       estimate: true,
       completed: true,
@@ -126,7 +153,8 @@ export async function exportCommand(argv: string[]): Promise<number> {
   const issueKeyById = new Map(issues.map((issue) => [issue.id, issue.issueKey]));
 
   const commentsByIssue = new Map<string, BacklogComment[]>();
-  if (args["include-comments"]) {
+  const needComments = args["include-comments"] || args["comments-sidecar"];
+  if (needComments) {
     let done = 0;
     await mapPool(issues, 4, async (issue) => {
       commentsByIssue.set(issue.issueKey, await client.getComments(issue.issueKey));
@@ -168,20 +196,33 @@ export async function exportCommand(argv: string[]): Promise<number> {
 
   if (args["dry-run"]) {
     info(`(dry-run) ${rows.length} 行、${chunks.length} ファイル分を書き出す予定です`);
+    if (args["comments-sidecar"]) {
+      const comments = buildCommentsFile(project.projectKey, commentsByIssue);
+      const total = comments.issues.reduce((n, i) => n + i.comments.length, 0);
+      info(`(dry-run) コメント ${total} 件（${comments.issues.length} 課題）を書き出す予定です`);
+    }
     if (args.relations && relations.parents.length > 0) {
       info(`(dry-run) 親子関係 ${relations.parents.length} 組をサイドカーに書き出す予定です`);
     }
   } else {
     await Deno.mkdir(dirname(outPath), { recursive: true });
+    await Deno.mkdir(join(dirname(outPath), "sidecars"), { recursive: true });
     for (const [index, part] of chunks.entries()) {
       const path = chunks.length === 1 ? outPath : withSuffix(outPath, `.part${index + 1}`);
       await Deno.writeTextFile(path, toCsv(part));
       info(`書き出しました: ${path} (${part.length} 行)`);
     }
     if (args.relations && relations.parents.length > 0) {
-      const path = withExtension(outPath, ".relations.json");
+      const path = sidecarPath(outPath, ".relations.json");
       await Deno.writeTextFile(path, `${JSON.stringify(relations, null, 2)}\n`);
       info(`親子関係: ${path} (${relations.parents.length} 組)`);
+    }
+    if (args["comments-sidecar"]) {
+      const comments = buildCommentsFile(project.projectKey, commentsByIssue);
+      const path = sidecarPath(outPath, ".comments.json");
+      await Deno.writeTextFile(path, `${JSON.stringify(comments, null, 2)}\n`);
+      const total = comments.issues.reduce((n, i) => n + i.comments.length, 0);
+      info(`コメント: ${path} (${comments.issues.length} 課題 / ${total} 件)`);
     }
     await writeReport(outPath, project.projectKey, rows.length, warnings);
   }
@@ -265,7 +306,7 @@ async function writeReport(
   rowCount: number,
   warnings: IssueWarning[],
 ): Promise<void> {
-  const path = join(dirname(outPath), "report.md");
+  const path = sidecarPath(outPath, ".report.md");
   const lines = [
     `# ${projectKey} export report`,
     "",
@@ -308,7 +349,7 @@ function summarize(rows: LinearCsvRow[], warnings: IssueWarning[], parentCount: 
   );
   if (parentCount > 0) {
     info(
-      `そのあと \`b2l enrich --team <TEAM>\` を実行すると、` +
+      "そのあと `b2l enrich --project <PROJ>` を実行すると、" +
         `親子課題 ${parentCount} 組を sub-issue として張り直せます。`,
     );
   }
@@ -325,10 +366,17 @@ function withSuffix(path: string, suffix: string): string {
   return dot < 0 ? `${path}${suffix}` : `${path.slice(0, dot)}${suffix}${path.slice(dot)}`;
 }
 
-/** out/PROJ.csv → out/PROJ.relations.json */
-export function withExtension(path: string, extension: string): string {
-  const dot = path.lastIndexOf(".");
-  return `${dot < 0 ? path : path.slice(0, dot)}${extension}`;
+/**
+ * サイドカーは CSV と同じディレクトリに置かない。
+ * `npx @linear/import` のファイル選択はディレクトリ内の全ファイルを並べるため、
+ * 隣に .json があると CSV と間違えて選ばれる（実際に選ばれてクラッシュした）。
+ *
+ * out/PROJ.csv → out/sidecars/PROJ.relations.json
+ */
+export function sidecarPath(csvPath: string, extension: string): string {
+  const dir = dirname(csvPath);
+  const base = basename(csvPath).replace(/\.[^.]*$/, "");
+  return join(dir, "sidecars", `${base}${extension}`);
 }
 
 function parseIntOr(value: string | undefined, fallback: number): number {
